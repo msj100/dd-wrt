@@ -4,6 +4,8 @@
 #
 # See https://forum.dd-wrt.com/phpBB2/viewtopic.php?p=1185089
 #
+# Mark Jones, May 2021 - script@resimplify.net
+#
 
 # 1) Identify wireless interfaces wl[0-9]_net_mode != disabled
 # 2) Map wireles -> eth interface for interfaces identified in 1)

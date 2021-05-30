@@ -1,0 +1,266 @@
+#!/bin/sh
+#
+# Script to verify VLAN configuration settings in NVRAM - essentially
+# seeks to validate settings are consistent with the VLAN configuration
+# described at:
+#
+# https://wiki.dd-wrt.com/wiki/index.php/VLAN_Bridging_WAN_and_a_LAN_port#VLANs
+#
+# May not be perfect, may not work on some routers, however, is only reading
+# NVRAM variables so should not do any damage
+#
+# Usage: vlan_check [-v]
+#
+# Mark Jones, May 2021 - script@resimplify.net
+#
+
+# Check for verbose switch
+#
+if [ "${1}" == "-v" ]; then
+	verbose=1
+else
+	verbose=0
+fi
+
+# Print relevant NVRAM configuration settings
+#
+nvram show 2>/dev/null | awk '/port[0-9]+vlans=/ {
+	n=$1;
+	sub("vlans=.*", "", n); sub("port", "", n);
+	print n" "$0;
+}
+' | sort -n | sed -e "s/^[0-9]* //"
+echo "----------------------------------------------"
+
+nvram show 2>/dev/null | awk '/vlan[0-9]+ports=/ {
+	n=$1;
+	sub("ports=.*", "", n); sub("vlan", "", n);
+	print n" "$0;
+}
+' | sort -n | sed -e "s/^[0-9]* //"
+echo "----------------------------------------------"
+
+nvram show 2>/dev/null | awk '/vlan[0-9]+hwname=/ {
+	n=$1;
+	sub("hwname=.*", "", n); sub("vlan", "", n);
+	print n" "$0;
+}
+' | sort -n | sed -e "s/^[0-9]* //"
+echo "----------------------------------------------"
+
+# Build a list of the vlans
+#
+vlan_list=`nvram show 2>/dev/null | \
+awk '/vlan[0-9]+ports=/ {
+	sub("ports=.*", "") ; sub("vlan", "");
+	print $0;
+}' | sort -n`
+
+# Check vlan interface exists
+#
+error_count=0
+for vlan in ${vlan_list}; do
+	ifconfig vlan${vlan} >/dev/null 2>&1
+	if [ ${?} -ne 0 ]; then
+		echo "ERROR: Interface vlan${vlan} is missing"
+		error_count=$(expr ${error_count} + 1)
+	fi
+	nvram show 2>/dev/null | grep "vlan${vlan}hwname" >/dev/null 2>&1
+	if [ ${?} -ne 0 ]; then
+		echo "ERROR: NVRAM setting vlan${vlan}hwname is missing"
+		error_count=$(expr ${error_count} + 1)
+	fi
+done
+
+# Build a list of the ports
+#
+port_list=`nvram show 2>/dev/null | \
+awk '/port[0-9]+vlans=/ {
+	sub("vlans=.*", "") ; sub("port", "");
+	print $0;
+}' | sort -n`
+
+# Build a list of the VLAN hardware interfaces
+#
+vlan_hw_list=`nvram show 2>/dev/null | \
+awk '/vlan[0-9]+hwname=/ {
+	sub("hwname=.*", "") ; sub("vlan", "");
+	print $0;
+}' | sort -n`
+
+# Check hwnames, vlans and ports all line up correctly
+#
+awk -vport_list="${port_list}" -vvlan_list="${vlan_list}" \
+	-verror_count="${error_count}" -vverbose="${verbose}" 'BEGIN {
+	warning_count=0;
+	split(port_list, port_array);
+	for (p in port_array) {
+		pv_string="nvram get port"port_array[p]"vlans";
+		pv_string | getline line; close(pv_string);
+		pv_array[port_array[p]]=line;
+		port_exists[port_array[p]]=1;
+		if (match(line,"(^| )16( |$)")) {
+			tagged_port[port_array[p]]=1;
+		}
+	}
+	split(vlan_list, vlan_array);
+	for (v in vlan_array) {
+		vp_string="nvram get vlan"vlan_array[v]"ports";
+		vp_string | getline line; close(vp_string);
+		vp_array[vlan_array[v]]=line;
+		vlan_exists[vlan_array[v]]=1;
+	}
+	# Check port vlans (port<n>vlans)
+	for (p in pv_array) {
+		split(pv_array[p], pva_array);
+		for (vlan in pva_array) {
+			pv_vlan[p,pva_array[vlan]]=pva_array[vlan];
+		}
+	}
+	# Checking vlan ports (vlan<n>ports)
+	for (v in vp_array) {
+		split(vp_array[v], vpa_array);
+		for (port in vpa_array) {
+			simple_port=vpa_array[port];
+			sub("[a-z*]$", "", simple_port);
+			vp_port[v,simple_port]=vpa_array[port];
+			# print "vp_port["v"]["simple_port"]="vpa_array[port];
+		}
+	}
+	# Check port2vlans exists in vlan2ports
+	for (p in pv_array) {
+		issues=0;
+		if (verbose) print "Checking: port"p"vlans made up of vlans "pv_array[p];
+		for (array_element in pv_vlan) {
+			split(array_element, array_index, SUBSEP);
+			if(array_index[1] != p) continue;
+			vnum=array_index[2];
+			delete array_index;
+			if (int(vnum) == 16) continue;
+			# Does vlan2port have the corresponding port entry?
+			if (vp_port[vnum,p] ~ "^"p"([*tu]|)$") {
+				# print "Confirmed vlan "vnum" has corresponding port "p;
+				;
+			} else {
+				append="";
+				if (int(vnum) > 15) {
+					type="WARNING";
+					warning_count++;
+				} else {
+					type="ERROR";
+					error_count++;
+				}
+				issues++;
+				exist="";
+				if(!vlan_exists[vnum]) exist=" EXIST so does not";
+				print type": vlan"vnum"ports does not"exist" include port "p" / port"p"vlans unnecessarily includes vlan "vnum""append;
+			}
+		}
+		if (verbose) {
+			if(issues==0) print "PASS"; else print "FAIL";
+			print "";
+		}
+	}
+	# Check vlan2ports exists in port2vlans
+	for (v in vp_array) {
+		issues=0;
+		if (verbose) print "Checking: vlan"v"ports made up of ports "vp_array[v];
+		for (array_element in vp_port) {
+			split(array_element, array_index, SUBSEP);
+			if(array_index[1] != v) continue;
+			pnum=array_index[2];
+			delete array_index;
+			# Does port2vlans have the corresponding vlan entry?
+			if (pv_vlan[pnum,v] ~ "^"v"$") {
+				# print "Confirmed vlan "pnum" has corresponding port "v;
+				;
+			} else {
+				if (int(pnum) > 5) {
+					type="WARNING";
+					warning_count++;
+				} else {
+					type="ERROR";
+					error_count++;
+				}
+				issues++;
+				exist="";
+				if(!port_exists[pnum]) exist=" EXIST so does not";
+				print type": port"pnum"vlans does not"exist" include vlan "v" / vlan"v"ports unnecessarily includes port "pnum;
+			}
+		}
+		if (verbose) {
+			if(issues==0) print "PASS"; else print "FAIL";
+			print "";
+		}
+	}
+	# Consolidate VLAN IDs - check vlanXhwname exists
+	for (v in vlan_array) {
+		full_vlan_exists[vlan_list_array[v]]=1;
+	}
+	for (p in pva_array) {
+		full_vlan_exists[pva_array[p]]=1;
+	}
+	c=0;
+	while (c<16) {
+		if(full_vlan_exists[c]) {
+			line="";
+			if (verbose) print "Checking: vlan"c"hwname exists";
+			hw_string="nvram get vlan"c"hwname";
+			hw_string | getline line; close(hw_string);
+			if (!line) {
+				print "ERROR: vlan"c"hwname does not exist";
+				if (verbose) print "FAIL";
+			} else {
+				if (verbose) print "PASS";
+			}
+			if (verbose) print "";
+		}
+		c++;
+	}
+	# Check tags in vlanXports are set correctly based on portsXvlans
+	# that contain value 16
+	for (v in vlan_array) {
+		issues=0;
+		vlan_port_list=vp_array[vlan_array[v]];
+		split(vlan_port_list, vlan_port_array);
+		if (verbose) print "Checking: vlan"vlan_array[v]"ports tags";
+		for (p in vlan_port_array) {
+			# Port is tagged - confirm that is correct
+			check_port=substr(vlan_port_array[p],1,1);
+			if (check_port == 5) continue;
+			if (vlan_port_array[p] ~ "t$") {
+				if (!tagged_port[check_port]) {
+					print "ERROR: vlan"vlan_array[v]"ports tags port "check_port" when port"check_port"vlans does not";
+					issues++;
+					error_count++;
+				}
+			} else {
+				# Port is not tagged - confirm that is correct
+				if (tagged_port[check_port]) {
+					if (vlan_array[v]==1) {
+						print "WARNING: vlan"vlan_array[v]"ports does not tag port "check_port" when port"check_port"vlans does (possibly just native VLAN 1 - so no tag required)";
+						warning_count++;
+					} else {
+						print "ERROR: vlan"vlan_array[v]"ports does not tag port "check_port" when port"check_port"vlans does";
+						issues++;
+						error_count++;
+					}
+				}
+			}
+		}
+		if (verbose) {
+			if(issues==0) print "PASS"; else print "FAIL";
+			print "";
+		}
+	}
+}
+END {
+	if ((error_count==0) && (warning_count==0)) {
+		print "All checks successful!";
+	} else {
+		if (error_count == 1) error_desc="error"; else error_desc="errors";
+		if (warning_count == 1) warning_desc="warning"; else warning_desc="warnings";
+		print "SUMMARY: "error_count" "error_desc", "warning_count" "warning_desc;
+	}
+}
+' </dev/null

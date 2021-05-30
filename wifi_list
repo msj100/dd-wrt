@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# Script to report Ethernet i/f, Wi-Fi i/f, VLAN ID and SSID configuration
+# - particularly useful for VLAN / VAP setups
+#
+# Assumes relevant wireless interfaces are visible using nvram / wl commands
+#
+# Mark Jones, May 2021 - script@resimplify.net
+#
+
+# Header
+echo "Ethernet Interface|Wi-Fi Interface|MAC Address       |VLAN ID        |SSID"
+
+# Look for Ethernet interfaces associated with Wi-Fi interfaces
+nvram show 2>/dev/null | \
+awk -F"=" '$0 ~ "wl[0-9]+_ifname=" { w=$1; sub("_.*", "", w); print w,$2 }' | \
+sort | while read line; do
+	wifi_interface=$(echo ${line} | cut -d" " -f1)
+	ethernet_interface=$(echo ${line} | cut -d" " -f2)
+
+	# For each Ethernet / Wi-Fi combination (including virtual Wi-Fi i/f),
+	# find the associated bridge and consequently associated VLAN ID
+	nvram show 2>/dev/null | \
+	awk -F"=" -v w=${wifi_interface} -v e=${ethernet_interface} \
+	'$0 ~ w"(|.[0-9]+)_hwaddr=[0-9A-F]" {
+		mac_address=$2;
+		if($1 ~ "[0-9].[0-9]") {
+			instance=$1;
+			sub("^wl[0-9]+.", "", instance);
+			sub("_hwaddr.*", "", instance);
+			wifi_int=w"."instance;
+		} else {
+			instance=0;
+			wifi_int=w;
+		}
+		print e,mac_address,wifi_int,instance
+	}' | sort -k1,3 | while read line2; do
+		mac_address=$(echo ${line2} | cut -d" " -f2)
+		wifi_int=$(echo ${line2} | cut -d" " -f3)
+		wifi_instance=$(echo ${line2} | cut -d" " -f4)
+		# Identify SSID from Wi-Fi interface (physical or virtual)
+		ssid=$(wl -i ${ethernet_interface} ssid -C ${wifi_instance} 2>/dev/null | \
+			awk -F'"' '{ print $2 }')
+		if [ ! -z "${ssid}" ]; then
+			if [ ${wifi_int%.*} == ${wifi_int} ]; then
+				bridge_int=${ethernet_interface}
+			else
+				bridge_int=${wifi_int}
+			fi
+			vlan=$(brctl show | \
+			awk -v b=${bridge_int} 'NF == 4 { vlan="" }
+			$NF ~ "^vlan" {
+				if(!vlan) {
+					vlan=$NF;
+					sub("vlan", "", vlan);
+				}
+			}
+			$NF == b { found_interface=1 }
+			{
+				if (found_interface) {
+					if (vlan) {
+						print vlan; exit
+					}
+				}
+			}')
+			printf "%-18s|%-15s|%-18s|%-15s|%s\n" "${ethernet_interface}" "${wifi_int}" "${mac_address}" "${vlan}" "${ssid}"
+		fi
+	done
+done
+
+exit 0

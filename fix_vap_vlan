@@ -1,0 +1,108 @@
+#!/bin/sh
+#
+# Run this script on startup - fixes problems with Broadcom VAP / VLAN
+#
+# See https://forum.dd-wrt.com/phpBB2/viewtopic.php?p=1185089
+#
+
+# 1) Identify wireless interfaces wl[0-9]_net_mode != disabled
+# 2) Map wireles -> eth interface for interfaces identified in 1)
+# 	- wl[0-9]_ifname from list in 1)
+# 3) Ignore any interfaces from 2) that appear in probe_blacklist
+# 4) Union with the interaces in probe_working
+# 5) sleep 20
+# 6) stopservice nas
+# 7) wlconf <eth_interface> down
+# 8) wlconf <eth_interface> up
+# 9) startservice nas
+
+# root@office:~# nvram show | grep probe
+# net.ipv4.tcp_keepalive_probes=5
+# size: 40619 bytes (24917 left)
+# probe_working=eth1 wl0.1
+
+
+# root@vlan-switch:~# nvram show | grep -i wl[0-9]_net_mode
+# wl0_net_mode=ng-only
+# wl1_net_mode=disabled
+# size: 51567 bytes (13969 left)
+# root@vlan-switch:~# nvram show | grep -i wl[0-9].*eth
+# size: 51567 bytes (13969 left)
+# wl0_ifname=eth1
+# wl1_ifname=eth2
+
+# wl -i eth1 status
+# wl -i wl0.1 status
+# wl -i eth2 status
+
+# eth1 = g/n wireless interface (on AC68U)
+# eth2 = ac wireless interface (on AC68U)
+
+interface_list=""
+# Build list of interfaces to recycle
+for interface in `nvram show 2>/dev/null | awk -F"=" '
+/^wl[0-9]+_net_mode/ && $2 != "disabled" {
+	wireless_interface=$1;
+	sub("_net_mode", "", wireless_interface);
+	cmd="nvram get "wireless_interface"_ifname 2>/dev/null";
+	system(cmd)
+}'`; do
+	if [ -z "${interface_list}" ]; then
+		interface_list="${interface}"
+	else
+		interface_list="${interface_list} ${interface}"
+	fi
+done
+
+# Remove any interfaces from prob_blacklist
+for blacklisted in `nvram get probe_blacklist 2>/dev/null`; do
+	echo ${interface_list} | grep -E "(^| +)${blacklisted}( +|$)" >/dev/null 2>&1
+	if [ ${?} -eq 0 ]; then
+		# Remove blacklisted interface from interface_list
+		new_list=""
+		for i in ${interface_list}; do
+			if [ ${i} -eq ${blacklisted} ]; then
+				continue
+			fi
+			if [ -z "${new_list}" ]; then
+				new_list=${i}
+			else
+				new_list="${new_list} ${i}"
+			fi
+		done
+		interface_list=${new_list}
+	fi
+done
+
+# Build final list of interfaces using probe_working
+final_interface_list=""
+probe_list=`nvram get probe_working 2>/dev/null`
+for i in ${interface_list}; do
+	echo ${probe_list} | grep -E "(^| +)${i}( +|$)" >/dev/null 2>&1
+	if [ ${?} -eq 0 ]; then
+		if [ -z "${final_interface_list}" ]; then
+			final_interface_list=${i}
+		else
+			final_interface_list="${final_interface_list} ${i}"
+		fi
+	fi
+done
+
+# OK - we now have the list of wireless (eth) interfaces to restart
+
+# Not 100% certain why we sleep for 20
+sleep 20
+
+stopservice nas
+
+# Take all interfaces down
+for interface in ${final_interface_list}; do
+	wlconf ${interface} down
+done
+
+# Bring all interfaces up
+for interface in ${final_interface_list}; do
+	wlconf ${interface} up
+done
+
+startservice nas

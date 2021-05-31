@@ -9,7 +9,7 @@
 #
 
 # Header
-echo "Ethernet Interface|Wi-Fi Interface|MAC Address       |VLAN ID        |SSID"
+echo "Ethernet Interface|Wi-Fi Interface|Wi-Fi MAC Address |Bridge Interface|VLAN ID        |SSID"
 
 # Look for Ethernet interfaces associated with Wi-Fi interfaces
 nvram show 2>/dev/null | \
@@ -43,27 +43,30 @@ sort | while read line; do
 			awk -F'"' '{ print $2 }')
 		if [ ! -z "${ssid}" ]; then
 			if [ ${wifi_int%.*} == ${wifi_int} ]; then
-				bridge_int=${ethernet_interface}
+				wireless_interface=${ethernet_interface}
 			else
-				bridge_int=${wifi_int}
+				wireless_interface=${wifi_int}
 			fi
-			vlan=$(brctl show | \
-			awk -v b=${bridge_int} 'NF == 4 { vlan="" }
+			### vlan=$(brctl show | \
+			bridge_vlan=$(brctl show | \
+			awk -v w=${wireless_interface} 'NR > 1 && NF == 4 { vlan=""; bridge=$1 }
 			$NF ~ "^vlan" {
 				if(!vlan) {
 					vlan=$NF;
 					sub("vlan", "", vlan);
 				}
 			}
-			$NF == b { found_interface=1 }
+			$NF == w { found_interface=1 }
 			{
 				if (found_interface) {
 					if (vlan) {
-						print vlan; exit
+						print bridge,vlan; exit
 					}
 				}
 			}')
-			printf "%-18s|%-15s|%-18s|%-15s|%s\n" "${ethernet_interface}" "${wifi_int}" "${mac_address}" "${vlan}" "${ssid}"
+			bridge_interface=${bridge_vlan% *}
+			vlan=${bridge_vlan#* }
+			printf "%-18s|%-15s|%-18s|%-16s|%-15s|%s\n" "${ethernet_interface}" "${wifi_int}" "${mac_address}" "${bridge_interface}" "${vlan}" "${ssid}"
 		fi
 	done
 done

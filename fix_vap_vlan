@@ -11,7 +11,7 @@
 # 2) Map wireles -> eth interface for interfaces identified in 1)
 # 	- wl[0-9]_ifname from list in 1)
 # 3) Ignore any interfaces from 2) that appear in probe_blacklist
-# 4) Union with the interaces in probe_working
+# 4) Union with the interfaces in probe_working
 # 5) sleep 20
 # 6) stopservice nas
 # 7) wlconf <eth_interface> down
